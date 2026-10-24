@@ -1,0 +1,8 @@
+{
+  "description": "jssdk的h5示例demo",
+  "compileType": "miniprogram",
+  "projectname": "hello world macle",
+  "setting": {
+    "es5": true
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "pages": ["index.html"],
+  "entryPagePath": "index.html",
+  "page": {},
+  "global": {
+    "window": {
+      "navigationBarBackgroundColor": "#247a3d",
+      "navigationBarTitleText": "Tasty Bites",
+      "backgroundTextStyle": "light",
+      "navigationBarTextStyle": "white",
+      "capsuleTheme": "light"
+    }
+  },
+  "type": "legacy"
+}
