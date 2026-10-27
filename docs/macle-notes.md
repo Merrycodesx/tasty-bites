@@ -8,3 +8,8 @@
 3. Does `localStorage` work? (The app falls back silently.)
 4. Is `window.ma` present? The app does not use it. `event-bus.js` from the starter is intentionally not included.
 5. Does the legacy/es5 setting need a lower build target?
+
+## Added with QR ordering / live updates (all UNVERIFIED in the Macle runtime)
+6. How does the Telebirr SuperApp open the Mini-App from a scanned QR, and are URL query parameters (`?t=...`) passed through to the page? The app reads `?t=` from `location.search` or the hash. If the SuperApp uses its own QR/deep-link format, the QR content must change (backend `PUBLIC_MINIAPP_URL`).
+7. Is fetch streaming (`ReadableStream`) available? If not, order tracking silently falls back to 20 s polling (code path exists, not tested in Macle).
+8. Is `localStorage` persistent across closing/reopening the Mini-App? Table context (4 h) and the last order depend on it.
