@@ -16,7 +16,7 @@ function newKey() {
 const Live = createContext<{ tick: number; live: boolean }>({ tick: 0, live: false });
 
 /** Loads data, reloads whenever a live event arrives, and falls back to polling when the stream is not live. */
-function usePoll<T>(load: () => Promise<T>, ms = 4000) {
+function usePoll<T>(load: () => Promise<T>, ms = 4000, refreshKey?: unknown) {
   const { tick, live } = useContext(Live);
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -24,7 +24,7 @@ function usePoll<T>(load: () => Promise<T>, ms = 4000) {
   const refresh = useCallback(async () => {
     try { setData(await ref.current()); setError(null); } catch (e) { setError((e as ApiError).message); }
   }, []);
-  useEffect(() => { refresh(); }, [refresh, tick]);
+  useEffect(() => { refresh(); }, [refresh, tick, refreshKey]);
   useEffect(() => { const id = setInterval(refresh, live ? 60000 : ms); return () => clearInterval(id); }, [refresh, live, ms]);
   return { data, error, refresh };
 }
@@ -103,15 +103,15 @@ const ErrorBar = ({ msg }: { msg: string | null }) => (msg ? <div className="err
 const statusPill = (s: string) => <span className={s === "cancelled" ? "pill bad" : s === "placed" ? "pill warn" : "pill"}>{s}</span>;
 
 function Dashboard() {
-  const [days, setDays] = useState(1);
-  const sum = usePoll<Summary>(() => api.summary(days), 10000);
+  const [period, setPeriod] = useState<Summary["period"]>("today");
+  const sum = usePoll<Summary>(() => api.summary(period), 10000, period);
   const act = usePoll(() => api.orders(), 5000);
   return (
     <>
       <h2>Dashboard</h2>
       <ErrorBar msg={sum.error} />
       <div className="row" style={{ marginBottom: 12 }}>
-        {[1, 7, 30].map((d) => <button key={d} className={d === days ? "btn primary" : "btn"} onClick={() => setDays(d)}>{d === 1 ? "Today (24h)" : `Last ${d} days`}</button>)}
+        {([["today", "Today"], ["month", "This month"], ["all", "All time"]] as const).map(([key, label]) => <button key={key} className={key === period ? "btn primary" : "btn"} onClick={() => setPeriod(key)}>{label}</button>)}
       </div>
       {!sum.data ? <div className="empty">Loading…</div> : (
         <div className="grid">
@@ -123,8 +123,26 @@ function Dashboard() {
       )}
       <h2 style={{ marginTop: 24 }}>Top items</h2>
       {sum.data && sum.data.topItems.length === 0 ? <div className="empty">No orders in this period yet.</div> : (
-        <table><thead><tr><th>Item</th><th>Qty</th><th>Revenue</th></tr></thead>
-          <tbody>{sum.data?.topItems.map((t) => <tr key={t.name}><td>{t.name}</td><td>{t.quantity}</td><td>{formatEtb(t.revenueSantim)}</td></tr>)}</tbody></table>
+        <div className="sales-chart" aria-label="Top selling menu items by paid sales">
+          {sum.data?.topItems.map((item) => {
+            const peak = Math.max(...(sum.data?.topItems.map((x) => x.revenueSantim) ?? [1]), 1);
+            return <div className="bar-row" key={item.name}><span>{item.name}</span><div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(3, item.revenueSantim / peak * 100)}%` }} /></div><strong>{formatEtb(item.revenueSantim)}</strong></div>;
+          })}
+        </div>
+      )}
+      <h2 style={{ marginTop: 24 }}>Top tables</h2>
+      {sum.data && sum.data.topTables.length === 0 ? <div className="empty">No paid dine-in orders in this period.</div> : (
+        <table><thead><tr><th>Table</th><th>Paid orders</th><th>Sales</th></tr></thead>
+          <tbody>{sum.data?.topTables.map((t) => <tr key={t.label}><td>{t.label}</td><td>{t.orderCount}</td><td>{formatEtb(t.salesSantim)}</td></tr>)}</tbody></table>
+      )}
+      <h2 style={{ marginTop: 24 }}>{period === "today" ? "Sales by hour" : period === "month" ? "Sales by day" : "Sales by month"}</h2>
+      {sum.data && sum.data.salesTimeline.length === 0 ? <div className="empty">No paid sales in this period yet.</div> : (
+        <div className="sales-chart" aria-label="Paid sales over time">
+          {sum.data?.salesTimeline.map((bucket) => {
+            const peak = Math.max(...(sum.data?.salesTimeline.map((x) => x.salesSantim) ?? [1]), 1);
+            return <div className="bar-row" key={bucket.label}><span>{bucket.label}</span><div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(3, bucket.salesSantim / peak * 100)}%` }} /></div><strong>{formatEtb(bucket.salesSantim)}</strong></div>;
+          })}
+        </div>
       )}
     </>
   );
@@ -136,7 +154,7 @@ function lineTotal(l: Line) {
   return (base + l.extraIds.reduce((s, id) => s + (l.item.extras.find((e) => e.id === id)?.priceSantim ?? 0), 0)) * l.quantity;
 }
 
-function Waiter({ role }: { role: string }) {
+function Waiter({ role, heading = "Waiter" }: { role: string; heading?: string }) {
   const menu = usePoll(() => api.menu(), 30000);
   const tables = usePoll(() => api.tables(), 5000);
   const orders = usePoll(() => api.orders(), 4000);
@@ -171,7 +189,7 @@ function Waiter({ role }: { role: string }) {
 
   return (
     <>
-      <h2>Waiter</h2>
+      <h2>{heading}</h2>
       <ErrorBar msg={err ?? menu.error ?? orders.error} />
       <div className="cols">
         {canCreate && (
@@ -293,6 +311,7 @@ function Kitchen() {
 function Cashier() {
   const orders = usePoll(() => api.orders(), 4000);
   const [err, setErr] = useState<string | null>(null);
+  const [manualOrder, setManualOrder] = useState(false);
   async function pay(o: Order) {
     if (!window.confirm(`Record cash payment of ${formatEtb(o.totalSantim)} for order #${o.orderNumber}?`)) return;
     try { await api.payCash(o.id); orders.refresh(); } catch (e) { setErr((e as ApiError).message); }
@@ -301,10 +320,16 @@ function Cashier() {
     try { await api.setStatus(o.id, "completed"); orders.refresh(); } catch (e) { setErr((e as ApiError).message); }
   }
   const open = orders.data?.orders ?? [];
+  const awaitingCash = open.filter((o) => o.paymentStatus !== "paid");
   return (
     <>
       <h2>Cashier</h2>
       <ErrorBar msg={err ?? orders.error} />
+      <div className="row" style={{ marginBottom: 12 }}>
+        <button className={manualOrder ? "btn primary" : "btn"} onClick={() => setManualOrder((v) => !v)}>{manualOrder ? "Hide manual order" : "Create order manually"}</button>
+        {awaitingCash.length > 0 && <span className="notice" role="status" aria-live="polite">{awaitingCash.length} order{awaitingCash.length === 1 ? "" : "s"} waiting for cashier payment confirmation</span>}
+      </div>
+      {manualOrder && <Waiter role="cashier" heading="Enter customer order" />}
       {orders.data && open.length === 0 && <div className="empty">No open bills.</div>}
       <div className="grid">
         {open.map((o) => (
@@ -315,10 +340,10 @@ function Cashier() {
             <div className="line"><strong>Total</strong><strong>{formatEtb(o.totalSantim)}</strong></div>
             <div className="row">
               <span className={o.paymentStatus === "paid" ? "pill" : "pill warn"}>{o.paymentStatus}</span>
-              {o.paymentStatus !== "paid" && <button className="btn primary" onClick={() => pay(o)}>Take cash</button>}
+              {o.paymentStatus !== "paid" && <button className="btn primary" onClick={() => pay(o)}>Confirm cash received</button>}
               {o.paymentStatus === "paid" && ["ready", "served"].includes(o.status) && <button className="btn" onClick={() => complete(o)}>Complete order</button>}
             </div>
-            {o.paymentStatus !== "paid" && <div className="muted">Telebirr payment is not enabled yet.</div>}
+            {o.paymentStatus !== "paid" && <div className="muted">Confirm only after receiving payment. Telebirr is not configured yet.</div>}
           </div>
         ))}
       </div>

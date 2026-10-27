@@ -40,11 +40,11 @@ Legend: PASS verified · PARTIAL · MOCK · FAIL · NOT IMPLEMENTED · BLOCKED. 
 | Staff/role/password management | NOT IMPLEMENTED | no way to create staff or change passwords except seed/SQL | **C (pilot blocker)** |
 | Waiter order entry | PARTIAL | works; waiter is optional per new requirements | L |
 | Kitchen queue and statuses | PASS (API, live) / PARTIAL (UI) | e2e; kitchen no longer sees customer PII | – |
-| Cashier billing, cash payment | PARTIAL | cash PASS; **defect**: an unpaid order can be completed and then vanishes from the cashier list (API still accepts payment) | H |
+| Cashier billing, cash payment | PARTIAL | Cashier view highlights unpaid orders and confirms cash receipt; cashier can manually enter an order/table when QR was not scanned. Telebirr is still unconfigured; unpaid-completion rule remains a known defect | H |
 | Receipts | NOT IMPLEMENTED | | H |
 | Menu management | PARTIAL | edit price/availability, add items; no categories/variants/extras/archive | H |
 | Tables + QR admin, TV displays, TV settings | PASS (API) / PARTIAL (UI) | tests + e2e; UI not browser-tested | – |
-| Reports | PARTIAL | one summary (rolling window, uses order creation time, not payment time/local day) | M |
+| Reports | PARTIAL | Dashboard supports today, this month, and all time; paid revenue uses settlement time and branch timezone, with top item/table rankings and hour/day/month bars. CSV export remains absent. Implementation not re-verified | M |
 | Inventory/recipes/stock | NOT IMPLEMENTED | | M |
 | Audit log | PARTIAL | cancels, cash, menu/table/display/settings recorded; no UI; menu changes lack old/new values | M |
 | Settings (payment timing etc.) | PARTIAL | only TV settings; configurable dine-in payment timing not built | H |

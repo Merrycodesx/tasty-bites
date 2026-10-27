@@ -305,7 +305,7 @@ function CheckoutScreen(p: { cart: CartLine[]; estimate: number; table: TableCtx
           </>
         )}
         <label className="field">Order notes (optional)<input value={notes} maxLength={500} onChange={(e) => setNotes(e.target.value)} /></label>
-        <div className="notice">Online payment is not available yet. You pay the restaurant directly.</div>
+        <div className="notice">Pay at the restaurant. The cashier will confirm your order as paid after receiving cash. Telebirr is not configured yet.</div>
         {error && <div className="error" role="alert">{error}</div>}
         <div className="total"><span>Estimated total</span><strong>{formatEtb(p.estimate)}</strong></div>
         <button className="primary" disabled={!valid || busy} onClick={submit}>{busy ? "Placing order…" : "Place order"}</button>

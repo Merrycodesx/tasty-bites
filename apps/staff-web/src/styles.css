@@ -33,6 +33,13 @@ label.f { display: grid; gap: 4px; font-size: 14px; font-weight: 600; }
 .tbl.occ { border-color: #d9a441; background: #fff7e3; } .tbl.sel { border-color: var(--green); background: var(--tint); }
 .kcol { display: grid; gap: 12px; } .board { display: grid; gap: 16px; grid-template-columns: repeat(3, 1fr); align-items: start; }
 .line { display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+.notice { display: inline-block; padding: 9px 12px; border-radius: 10px; background: #fff3d6; color: var(--amber); font-weight: 700; }
+.sales-chart { display: grid; gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+.bar-row { display: grid; grid-template-columns: minmax(100px, 180px) minmax(80px, 1fr) auto; align-items: center; gap: 10px; font-size: 14px; }
+.bar-row > span { overflow-wrap: anywhere; }
+.bar-row strong { text-align: right; white-space: nowrap; }
+.bar-track { height: 14px; overflow: hidden; border-radius: 999px; background: var(--bg); }
+.bar-fill { height: 100%; border-radius: inherit; background: var(--green); }
 table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
 .stat { font-size: 26px; font-weight: 800; }

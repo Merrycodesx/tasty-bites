@@ -14,7 +14,7 @@ export interface Table { id: number; label: string; seats: number; occupied: boo
 export interface AdminTable { id: number; label: string; seats: number; active: boolean; qrUrl: string }
 export interface DisplayDevice { id: number; name: string; createdAt: string; lastSeenAt: string | null; revokedAt: string | null }
 export interface DisplaySettings { readyMinutes: number; showTable: boolean; maxOrders: number }
-export interface Summary { days: number; orderCount: number; paidOrderCount: number; paidSalesSantim: number; averagePaidOrderSantim: number; topItems: { name: string; quantity: number; revenueSantim: number }[] }
+export interface Summary { period: "today" | "month" | "all"; orderCount: number; paidOrderCount: number; paidSalesSantim: number; averagePaidOrderSantim: number; topItems: { name: string; quantity: number; revenueSantim: number }[]; topTables: { label: string; orderCount: number; salesSantim: number }[]; salesTimeline: { label: string; salesSantim: number }[] }
 
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 
@@ -61,7 +61,7 @@ export const api = {
   revokeDisplay: (id: number) => call<void>("POST", `/api/v1/staff/admin/displays/${id}/revoke`),
   displaySettings: () => call<DisplaySettings>("GET", "/api/v1/staff/admin/display-settings"),
   saveDisplaySettings: (p: DisplaySettings) => call<DisplaySettings>("PUT", "/api/v1/staff/admin/display-settings", p),
-  summary: (days: number) => call<Summary>("GET", `/api/v1/staff/reports/summary?days=${days}`),
+  summary: (period: Summary["period"]) => call<Summary>("GET", `/api/v1/staff/reports/summary?period=${period}`),
 };
 
 /** Which screens each role may open. The server enforces the same rules; this only hides unusable screens. */

@@ -640,7 +640,7 @@ func (s *Service) CashPayment(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, httpx.Err(409, "already_paid", "This order is already paid."))
 		return
 	}
-	if _, err := tx.Exec(`INSERT INTO payments(order_id,provider,amount_santim,status,recorded_by) VALUES($1,'cash',$2,'paid',$3)`, id, total, u.ID); err != nil {
+	if _, err := tx.Exec(`INSERT INTO payments(order_id,provider,amount_santim,status,recorded_by,paid_at) VALUES($1,'cash',$2,'paid',$3,now())`, id, total, u.ID); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
@@ -687,15 +687,26 @@ func (s *Service) Tables(w http.ResponseWriter, r *http.Request) {
 // Summary powers the manager dashboard from real paid-order data.
 func (s *Service) Summary(w http.ResponseWriter, r *http.Request) {
 	u := auth.From(r)
-	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
-	if days < 1 || days > 366 {
-		days = 1
-	}
+	period := r.URL.Query().Get("period")
+	if period != "month" && period != "all" { period = "today" }
 	var orders, paidOrders int
 	var paidTotal, avg int64
-	s.DB.QueryRow(`SELECT count(*) FILTER (WHERE status<>'cancelled'), count(*) FILTER (WHERE payment_status='paid'),
-		COALESCE(sum(total_santim) FILTER (WHERE payment_status='paid'),0)
-		FROM orders WHERE branch_id=$1 AND created_at > now() - make_interval(days => $2)`, u.BranchID, days).Scan(&orders, &paidOrders, &paidTotal)
+	// Report periods follow the restaurant's local calendar. Revenue is grouped by actual settlement time.
+	orderPeriod, paymentPeriod := `TRUE`, `TRUE`
+	bucket := `to_char(timezone(b.timezone,p.paid_at), 'YYYY-MM')`
+	if period == "today" {
+		orderPeriod = `o.created_at >= (date_trunc('day', timezone(b.timezone, now())) AT TIME ZONE b.timezone) AND o.created_at < now()`
+		paymentPeriod = `p.paid_at >= (date_trunc('day', timezone(b.timezone, now())) AT TIME ZONE b.timezone) AND p.paid_at < now()`
+		bucket = `to_char(timezone(b.timezone,p.paid_at), 'HH24:00')`
+	} else if period == "month" {
+		orderPeriod = `o.created_at >= (date_trunc('month', timezone(b.timezone, now())) AT TIME ZONE b.timezone) AND o.created_at < now()`
+		paymentPeriod = `p.paid_at >= (date_trunc('month', timezone(b.timezone, now())) AT TIME ZONE b.timezone) AND p.paid_at < now()`
+		bucket = `to_char(timezone(b.timezone,p.paid_at), 'YYYY-MM-DD')`
+	}
+	s.DB.QueryRow(`SELECT
+		(SELECT count(*) FROM orders o JOIN branches b ON b.id=o.branch_id WHERE o.branch_id=$1 AND o.status<>'cancelled' AND `+orderPeriod+`),
+		(SELECT count(DISTINCT o.id) FROM orders o JOIN payments p ON p.order_id=o.id JOIN branches b ON b.id=o.branch_id WHERE o.branch_id=$1 AND o.status<>'cancelled' AND p.status='paid' AND `+paymentPeriod+`),
+		(SELECT COALESCE(sum(p.amount_santim),0) FROM payments p JOIN orders o ON o.id=p.order_id JOIN branches b ON b.id=o.branch_id WHERE o.branch_id=$1 AND o.status<>'cancelled' AND p.status='paid' AND `+paymentPeriod+`)`, u.BranchID).Scan(&orders, &paidOrders, &paidTotal)
 	if paidOrders > 0 {
 		avg = paidTotal / int64(paidOrders)
 	}
@@ -705,8 +716,8 @@ func (s *Service) Summary(w http.ResponseWriter, r *http.Request) {
 		Santim   int64  `json:"revenueSantim"`
 	}
 	top := []Top{}
-	rows, err := s.DB.Query(`SELECT oi.name, sum(oi.quantity), sum(oi.line_total_santim) FROM order_items oi JOIN orders o ON o.id=oi.order_id
-		WHERE o.branch_id=$1 AND o.status<>'cancelled' AND o.created_at > now() - make_interval(days => $2) GROUP BY oi.name ORDER BY 2 DESC LIMIT 5`, u.BranchID, days)
+	rows, err := s.DB.Query(`SELECT oi.name, sum(oi.quantity), sum(oi.line_total_santim) FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN branches b ON b.id=o.branch_id
+		WHERE o.branch_id=$1 AND o.status<>'cancelled' AND EXISTS (SELECT 1 FROM payments p JOIN branches b ON b.id=o.branch_id WHERE p.order_id=o.id AND p.status='paid' AND `+paymentPeriod+`) GROUP BY oi.name ORDER BY 3 DESC LIMIT 5`, u.BranchID)
 	if err == nil {
 		for rows.Next() {
 			var t Top
@@ -715,6 +726,43 @@ func (s *Service) Summary(w http.ResponseWriter, r *http.Request) {
 		}
 		rows.Close()
 	}
-	httpx.JSON(w, 200, map[string]any{"days": days, "orderCount": orders, "paidOrderCount": paidOrders,
-		"paidSalesSantim": paidTotal, "averagePaidOrderSantim": avg, "topItems": top})
+	type TableSales struct {
+		Label       string `json:"label"`
+		OrderCount  int    `json:"orderCount"`
+		SalesSantim int64  `json:"salesSantim"`
+	}
+	tables := []TableSales{}
+	tableRows, err := s.DB.Query(`SELECT t.label, count(DISTINCT o.id), COALESCE(sum(p.amount_santim),0)
+		FROM orders o JOIN branches b ON b.id=o.branch_id JOIN dining_tables t ON t.id=o.table_id JOIN payments p ON p.order_id=o.id
+		WHERE o.branch_id=$1 AND o.status<>'cancelled' AND p.status='paid' AND `+paymentPeriod+`
+		GROUP BY t.id,t.label ORDER BY 3 DESC LIMIT 5`, u.BranchID)
+	if err == nil {
+		for tableRows.Next() {
+			var t TableSales
+			if tableRows.Scan(&t.Label, &t.OrderCount, &t.SalesSantim) == nil {
+				tables = append(tables, t)
+			}
+		}
+		tableRows.Close()
+	}
+	type SalesBucket struct {
+		Label       string `json:"label"`
+		SalesSantim int64  `json:"salesSantim"`
+	}
+	timeline := []SalesBucket{}
+	dailyRows, err := s.DB.Query(`SELECT `+bucket+`, COALESCE(sum(p.amount_santim),0)
+		FROM payments p JOIN orders o ON o.id=p.order_id JOIN branches b ON b.id=o.branch_id
+		WHERE o.branch_id=$1 AND o.status<>'cancelled' AND p.status='paid' AND `+paymentPeriod+`
+		GROUP BY 1 ORDER BY 1`, u.BranchID)
+	if err == nil {
+		for dailyRows.Next() {
+			var b SalesBucket
+			if dailyRows.Scan(&b.Label, &b.SalesSantim) == nil {
+				timeline = append(timeline, b)
+			}
+		}
+		dailyRows.Close()
+	}
+	httpx.JSON(w, 200, map[string]any{"period": period, "orderCount": orders, "paidOrderCount": paidOrders,
+		"paidSalesSantim": paidTotal, "averagePaidOrderSantim": avg, "topItems": top, "topTables": tables, "salesTimeline": timeline})
 }
