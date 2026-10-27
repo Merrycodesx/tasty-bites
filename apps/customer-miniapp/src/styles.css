@@ -55,3 +55,9 @@ legend { font-weight: 700; padding: 0 6px; }
 .status { display: inline-block; justify-self: start; padding: 8px 14px; border-radius: 999px; background: var(--green-tint); color: var(--green-dark); font-weight: 700; }
 .status.s-cancelled { background: #fdecea; color: var(--danger); }
 @media (prefers-reduced-motion: no-preference) { .sheet { animation: up .18s ease-out; } @keyframes up { from { transform: translateY(24px); opacity: .6; } } }
+
+.tablebadge { margin: 0 0 10px; background: rgba(255,255,255,.18); border-radius: 10px; padding: 8px 12px; font-size: 14px; }
+.tablebadge strong { font-size: 18px; }
+.tablecard { display: grid; gap: 4px; background: var(--green-tint); border: 2px solid var(--green); border-radius: 14px; padding: 14px; font-weight: 600; }
+.tablecard strong { font-size: 32px; color: var(--green-dark); }
+.link { background: none; border: 0; color: inherit; text-decoration: underline; padding: 0; }

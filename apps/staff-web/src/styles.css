@@ -37,3 +37,6 @@ table { width: 100%; border-collapse: collapse; background: #fff; border-radius:
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
 .stat { font-size: 26px; font-weight: 800; }
 @media (max-width: 800px) { .shell { grid-template-columns: 1fr; } .side { flex-direction: row; flex-wrap: wrap; align-items: center; } .side .who { margin: 0 0 0 auto; } .cols, .board { grid-template-columns: 1fr; } }
+
+input[readonly] { width: 100%; }
+@media print { .side, .noprint, h2 { display: none !important; } .shell { display: block; } main { padding: 0; max-width: none; } .qrsheet { grid-template-columns: repeat(3, 1fr); } .card { break-inside: avoid; } }

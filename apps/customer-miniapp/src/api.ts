@@ -6,7 +6,7 @@ export interface MenuItem {
   available: boolean; variants: Option[]; extras: Option[];
 }
 export interface Category { id: number; name: string; items: MenuItem[] }
-export interface TableRef { id: number; label: string }
+export interface TableInfo { table: { label: string }; restaurant: { name: string } }
 export interface OrderItem {
   id: number; name: string; variantName: string; quantity: number; lineTotalSantim: number;
   note: string; kitchenStatus: string; options: { name: string; priceSantim: number }[];
@@ -17,7 +17,7 @@ export interface Order {
 }
 export interface OrderRequest {
   orderType: "dine_in" | "takeaway" | "delivery";
-  tableId?: number; customerName: string; customerPhone: string; deliveryAddress: string; notes: string;
+  tableToken?: string; customerName: string; customerPhone: string; deliveryAddress: string; notes: string;
   items: { menuItemId: number; variantId?: number; extraIds: number[]; quantity: number; note: string }[];
 }
 
@@ -41,7 +41,8 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const getMenu = () => call<{ categories: Category[] }>("/api/v1/menu");
-export const getTables = () => call<{ tables: TableRef[] }>("/api/v1/tables");
+export const resolveTable = (token: string) => call<TableInfo>(`/api/v1/tables/resolve?t=${encodeURIComponent(token)}`);
+export const API_BASE = BASE;
 export const trackOrder = (token: string) => call<Order>(`/api/v1/orders/track/${encodeURIComponent(token)}`);
 export const placeOrder = (req: OrderRequest, idempotencyKey: string) =>
   call<Order>("/api/v1/orders", { method: "POST", body: JSON.stringify(req), headers: { "Idempotency-Key": idempotencyKey } });

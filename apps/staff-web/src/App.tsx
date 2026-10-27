@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, Category, MenuItem, Order, ROLE_SCREENS, Summary, Table, User, api, setToken, setUnauthorizedHandler } from "./api";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import QRCode from "qrcode";
+import { connectSse, SseState } from "./sse";
+import { API_BASE, AdminTable, ApiError, Category, DisplayDevice, DisplaySettings, MenuItem, Order, ROLE_SCREENS, Summary, Table, User, api, setToken, setUnauthorizedHandler } from "./api";
 import { formatEtb } from "./money";
 import { parseEtb } from "./parse";
 
-const LABEL: Record<string, string> = { dashboard: "Dashboard", waiter: "Waiter", kitchen: "Kitchen", cashier: "Cashier", menu: "Menu" };
+const LABEL: Record<string, string> = { dashboard: "Dashboard", waiter: "Waiter", kitchen: "Kitchen", cashier: "Cashier", menu: "Menu", setup: "Setup" };
 const SESSION_KEY = "tb_staff_session";
 
 function newKey() {
@@ -11,42 +13,61 @@ function newKey() {
   return c?.randomUUID ? c.randomUUID() : `k-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-/** Polls an async loader every `ms` (REST for now; WebSockets come later). */
+const Live = createContext<{ tick: number; live: boolean }>({ tick: 0, live: false });
+
+/** Loads data, reloads whenever a live event arrives, and falls back to polling when the stream is not live. */
 function usePoll<T>(load: () => Promise<T>, ms = 4000) {
+  const { tick, live } = useContext(Live);
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef(load); ref.current = load;
   const refresh = useCallback(async () => {
     try { setData(await ref.current()); setError(null); } catch (e) { setError((e as ApiError).message); }
   }, []);
-  useEffect(() => { refresh(); const id = setInterval(refresh, ms); return () => clearInterval(id); }, [refresh, ms]);
+  useEffect(() => { refresh(); }, [refresh, tick]);
+  useEffect(() => { const id = setInterval(refresh, live ? 60000 : ms); return () => clearInterval(id); }, [refresh, live, ms]);
   return { data, error, refresh };
 }
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [screen, setScreen] = useState("");
+  const [tick, setTick] = useState(0);
+  const [conn, setConn] = useState<SseState>("connecting");
 
   const signOut = useCallback(() => { setToken(null); setUser(null); try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ } }, []);
   useEffect(() => { setUnauthorizedHandler(signOut); }, [signOut]);
+  // One live stream per signed-in session. Events only say "something changed"; each screen re-reads the API.
+  const sessionToken = useRef<string | null>(null);
+  useEffect(() => {
+    if (!user) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const bump = () => { clearTimeout(t); t = setTimeout(() => setTick((n) => n + 1), 150); };
+    const close = connectSse({
+      url: `${API_BASE}/api/v1/staff/events`, headers: { Authorization: `Bearer ${sessionToken.current ?? ""}` },
+      onReady: bump, onEvent: bump, onState: setConn, onFatal: (st) => { if (st === 401) signOut(); },
+    });
+    return () => { clearTimeout(t); close(); };
+  }, [user, signOut]);
   // Session token lives in sessionStorage (cleared when the tab closes). Tradeoff documented in docs/decisions.md.
   useEffect(() => {
     try {
       const raw = sessionStorage.getItem(SESSION_KEY);
-      if (raw) { const s = JSON.parse(raw) as { token: string; user: User }; setToken(s.token); setUser(s.user); setScreen(ROLE_SCREENS[s.user.role][0]); }
+      if (raw) { const s = JSON.parse(raw) as { token: string; user: User }; setToken(s.token); sessionToken.current = s.token; setUser(s.user); setScreen(ROLE_SCREENS[s.user.role][0]); }
     } catch { /* ignore */ }
   }, []);
 
-  if (!user) return <Login onDone={(t, u) => { setToken(t); setUser(u); setScreen(ROLE_SCREENS[u.role][0]);
+  if (!user) return <Login onDone={(t, u) => { setToken(t); sessionToken.current = t; setUser(u); setScreen(ROLE_SCREENS[u.role][0]);
     try { sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: t, user: u })); } catch { /* ignore */ } }} />;
 
   const screens = ROLE_SCREENS[user.role];
   return (
+    <Live.Provider value={{ tick, live: conn === "live" }}>
     <div className="shell">
       <nav className="side" aria-label="Main">
         <h1>Tasty Bites</h1>
         {screens.map((s) => <button key={s} className={screen === s ? "on" : ""} onClick={() => setScreen(s)}>{LABEL[s]}</button>)}
-        <div className="who">{user.fullName} · {user.role}<br /><button onClick={() => { api.logout().catch(() => {}); signOut(); }}>Sign out</button></div>
+        <div className="who"><span title="Live updates">{conn === "live" ? "● Live" : conn === "unsupported" ? "Live updates unavailable (polling)" : "○ Reconnecting… (polling)"}</span><br />{user.fullName} · {user.role}<br /><button onClick={() => { api.logout().catch(() => {}); signOut(); }}>Sign out</button></div>
       </nav>
       <main>
         {screen === "dashboard" && <Dashboard />}
@@ -54,8 +75,10 @@ export default function App() {
         {screen === "kitchen" && <Kitchen />}
         {screen === "cashier" && <Cashier />}
         {screen === "menu" && <MenuAdmin />}
+        {screen === "setup" && <Setup />}
       </main>
     </div>
+    </Live.Provider>
   );
 }
 
@@ -346,6 +369,94 @@ function MenuAdmin() {
           </tbody></table>
         </section>
       ))}
+    </>
+  );
+}
+
+
+function Qr({ text, size = 160 }: { text: string; size?: number }) {
+  const [src, setSrc] = useState("");
+  useEffect(() => { let on = true; QRCode.toDataURL(text, { width: size, margin: 1, errorCorrectionLevel: "M" }).then((u) => on && setSrc(u)).catch(() => on && setSrc("")); return () => { on = false; }; }, [text, size]);
+  return src ? <img src={src} width={size} height={size} alt="QR code" /> : <div className="muted" style={{ width: size }}>QR unavailable</div>;
+}
+
+const TV_URL = (import.meta.env.VITE_TV_URL as string | undefined) ?? "http://localhost:5175";
+
+function Setup() {
+  const tables = usePoll(() => api.adminTables(), 60000);
+  const displays = usePoll(() => api.displays(), 60000);
+  const [settings, setSettings] = useState<DisplaySettings | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [newTable, setNewTable] = useState({ label: "", seats: "4" });
+  const [newDisplay, setNewDisplay] = useState("");
+  const [pairing, setPairing] = useState<{ name: string; link: string } | null>(null);
+  useEffect(() => { api.displaySettings().then(setSettings).catch((e) => setErr((e as ApiError).message)); }, []);
+  const run = async (f: () => Promise<unknown>, ok?: string) => { try { await f(); setErr(null); if (ok) setMsg(ok); tables.refresh(); displays.refresh(); } catch (e) { setErr((e as ApiError).message); } };
+
+  return (
+    <>
+      <h2>Setup</h2>
+      <ErrorBar msg={err ?? tables.error ?? displays.error} />
+      {msg && <div className="pill" style={{ marginBottom: 12 }}>{msg}</div>}
+
+      <section className="noprint">
+        <h3>Public TV displays</h3>
+        <p className="muted">Each TV gets its own pairing link. Open the link once on the TV; it is stored there. Revoke a display to stop it immediately.</p>
+        <form className="row" onSubmit={(e) => { e.preventDefault(); run(async () => { const d = await api.createDisplay(newDisplay); setPairing({ name: d.name, link: `${TV_URL}#token=${d.token}` }); setNewDisplay(""); }); }}>
+          <input placeholder="Display name (e.g. Entrance TV)" value={newDisplay} onChange={(e) => setNewDisplay(e.target.value)} required maxLength={60} />
+          <button className="btn primary">Create pairing link</button>
+        </form>
+        {pairing && (
+          <div className="card" style={{ marginTop: 10 }}>
+            <strong>Pairing link for “{pairing.name}” — shown only once</strong>
+            <input readOnly value={pairing.link} onFocus={(e) => e.target.select()} aria-label="Pairing link" />
+            <div className="row"><button className="btn" onClick={() => navigator.clipboard?.writeText(pairing.link)}>Copy link</button><button className="btn" onClick={() => setPairing(null)}>I have saved it</button></div>
+            <Qr text={pairing.link} size={180} />
+          </div>
+        )}
+        <table style={{ marginTop: 10 }}><thead><tr><th>Name</th><th>Status</th><th>Last seen</th><th></th></tr></thead><tbody>
+          {displays.data?.displays.map((d: DisplayDevice) => (
+            <tr key={d.id}><td>{d.name}</td><td><span className={d.revokedAt ? "pill bad" : "pill"}>{d.revokedAt ? "Revoked" : "Active"}</span></td>
+              <td>{d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString() : "Never"}</td>
+              <td>{!d.revokedAt && <button className="btn danger" onClick={() => window.confirm(`Revoke “${d.name}”? The TV stops showing orders immediately.`) && run(() => api.revokeDisplay(d.id), "Display revoked.")}>Revoke</button>}</td></tr>
+          ))}
+        </tbody></table>
+        {displays.data && displays.data.displays.length === 0 && <div className="empty">No displays yet.</div>}
+        {settings && (
+          <form className="card" style={{ marginTop: 12 }} onSubmit={(e) => { e.preventDefault(); run(async () => setSettings(await api.saveDisplaySettings(settings)), "TV settings saved."); }}>
+            <h3>TV board settings</h3>
+            <label className="f">Keep “ready” orders on screen for (minutes)<input type="number" min={1} max={60} value={settings.readyMinutes} onChange={(e) => setSettings({ ...settings, readyMinutes: Number(e.target.value) })} /></label>
+            <label className="f">Maximum orders shown<input type="number" min={10} max={100} value={settings.maxOrders} onChange={(e) => setSettings({ ...settings, maxOrders: Number(e.target.value) })} /></label>
+            <label><input type="checkbox" checked={settings.showTable} onChange={(e) => setSettings({ ...settings, showTable: e.target.checked })} /> Show table numbers on the public TV</label>
+            <button className="btn primary">Save</button>
+          </form>
+        )}
+      </section>
+
+      <section style={{ marginTop: 24 }}>
+        <div className="row noprint"><h3 style={{ margin: 0 }}>Tables and QR codes</h3><button className="btn" onClick={() => window.print()}>Print QR sheet</button></div>
+        {tables.data && !tables.data.qrConfigured && <div className="error noprint">The server has no PUBLIC_MINIAPP_URL, so QR links cannot be built. Set it and restart the API.</div>}
+        <form className="row noprint" style={{ margin: "10px 0" }} onSubmit={(e) => { e.preventDefault(); run(async () => { await api.createTable(newTable.label, Number(newTable.seats) || 4); setNewTable({ label: "", seats: "4" }); }, "Table added."); }}>
+          <input placeholder="Table label (e.g. T9)" value={newTable.label} onChange={(e) => setNewTable({ ...newTable, label: e.target.value })} required maxLength={20} />
+          <input type="number" min={1} max={50} value={newTable.seats} onChange={(e) => setNewTable({ ...newTable, seats: e.target.value })} style={{ width: 80 }} aria-label="Seats" />
+          <button className="btn primary">Add table</button>
+        </form>
+        <div className="grid qrsheet">
+          {tables.data?.tables.map((t: AdminTable) => (
+            <div key={t.id} className="card" style={{ opacity: t.active ? 1 : 0.55 }}>
+              <h3>Table {t.label}<span className={t.active ? "pill" : "pill bad"}>{t.active ? "Active" : "Disabled"}</span></h3>
+              {t.qrUrl ? <Qr text={t.qrUrl} /> : <div className="muted">No QR (server URL not set)</div>}
+              <div className="muted">Scan to order at table {t.label}</div>
+              <div className="row noprint">
+                <button className="btn" onClick={() => run(() => api.patchTable(t.id, { active: !t.active }))}>{t.active ? "Disable" : "Enable"}</button>
+                <button className="btn danger" onClick={() => window.confirm(`Rotate the QR code for table ${t.label}? Printed codes stop working.`) && run(() => api.rotateQr(t.id), "QR rotated. Print the new code.")}>Rotate QR</button>
+                {t.qrUrl && <button className="btn" onClick={() => navigator.clipboard?.writeText(t.qrUrl)}>Copy link</button>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
     </>
   );
 }

@@ -1,11 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, Category, MenuItem, Order, OrderRequest, TableRef, getMenu, getTables, placeOrder, trackOrder } from "./api";
+import { API_BASE, ApiError, Category, MenuItem, Order, OrderRequest, getMenu, placeOrder, resolveTable, trackOrder } from "./api";
+import { connectSse } from "./sse";
 import { formatEtb } from "./money";
 
 interface CartLine { key: string; item: MenuItem; variantId?: number; extraIds: number[]; quantity: number; note: string }
 type Screen = "menu" | "cart" | "checkout" | "status";
 
 const TOKEN_KEY = "tb_last_order_token";
+const TABLE_KEY = "tb_table";
+const TABLE_TTL_MS = 4 * 60 * 60 * 1000; // a scanned table stays valid on this device for 4 hours
+
+interface TableCtx { state: "none" | "loading" | "ok" | "invalid" | "error"; token?: string; label?: string; message?: string }
+
+function readTableToken(): string | null {
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get("t") ?? new URLSearchParams(window.location.hash.replace(/^#\/?\??/, "")).get("t");
+    if (fromUrl) { localStorage.setItem(TABLE_KEY, JSON.stringify({ token: fromUrl, savedAt: Date.now() })); return fromUrl; }
+    const raw = localStorage.getItem(TABLE_KEY);
+    if (raw) {
+      const v = JSON.parse(raw) as { token: string; savedAt: number };
+      if (Date.now() - v.savedAt < TABLE_TTL_MS) return v.token;
+      localStorage.removeItem(TABLE_KEY);
+    }
+  } catch { /* storage or URL APIs may be unavailable in the Mini-App runtime */ }
+  return null;
+}
+function forgetTable() { try { localStorage.removeItem(TABLE_KEY); } catch { /* ignore */ } }
 const store = {
   get: () => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } },
   set: (v: string) => { try { localStorage.setItem(TOKEN_KEY, v); } catch { /* storage may be unavailable in the Mini-App runtime */ } },
@@ -36,6 +56,20 @@ export default function App() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [token, setToken] = useState<string | null>(store.get());
   const [picked, setPicked] = useState<MenuItem | null>(null);
+  const [table, setTable] = useState<TableCtx>({ state: "none" });
+
+  const loadTable = useCallback(() => {
+    const token = readTableToken();
+    if (!token) { setTable({ state: "none" }); return; }
+    setTable({ state: "loading", token });
+    resolveTable(token)
+      .then((r) => setTable({ state: "ok", token, label: r.table.label }))
+      .catch((e: ApiError) => {
+        if (e.status === 404) { forgetTable(); setTable({ state: "invalid", message: e.message }); }
+        else setTable({ state: "error", token, message: e.message });
+      });
+  }, []);
+  useEffect(loadTable, [loadTable]);
 
   const loadMenu = useCallback(() => {
     setMenu(null); setMenuError(null);
@@ -49,14 +83,14 @@ export default function App() {
   return (
     <div className="app">
       {screen === "menu" && (
-        <MenuScreen menu={menu} error={menuError} retry={loadMenu} onPick={setPicked} hasOrder={!!token}
+        <MenuScreen menu={menu} error={menuError} retry={loadMenu} onPick={setPicked} hasOrder={!!token} table={table} retryTable={loadTable}
           onTrack={() => setScreen("status")} />
       )}
       {screen === "cart" && (
         <CartScreen cart={cart} setCart={setCart} estimate={estimate} back={() => setScreen("menu")} next={() => setScreen("checkout")} />
       )}
       {screen === "checkout" && (
-        <CheckoutScreen cart={cart} estimate={estimate} back={() => setScreen("cart")}
+        <CheckoutScreen cart={cart} estimate={estimate} table={table} retryTable={loadTable} back={() => setScreen("cart")}
           done={(o) => { if (o.publicToken) { store.set(o.publicToken); setToken(o.publicToken); } setCart([]); setScreen("status"); }} />
       )}
       {screen === "status" && token && <StatusScreen token={token} back={() => setScreen("menu")} />}
@@ -82,7 +116,13 @@ function mergeLine(cart: CartLine[], line: CartLine): CartLine[] {
   return copy;
 }
 
-function MenuScreen(p: { menu: Category[] | null; error: string | null; retry: () => void; onPick: (i: MenuItem) => void; hasOrder: boolean; onTrack: () => void }) {
+function TableNotice({ table, retry }: { table: TableCtx; retry: () => void }) {
+  if (table.state === "invalid") return <div className="error" role="alert">{table.message} You can still order takeaway.</div>;
+  if (table.state === "error") return <div className="error" role="alert">{table.message} <button className="link" onClick={retry}>Try again</button></div>;
+  return null;
+}
+
+function MenuScreen(p: { menu: Category[] | null; error: string | null; retry: () => void; onPick: (i: MenuItem) => void; hasOrder: boolean; onTrack: () => void; table: TableCtx; retryTable: () => void }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState<number | null>(null);
   const items = useMemo(() => {
@@ -95,8 +135,11 @@ function MenuScreen(p: { menu: Category[] | null; error: string | null; retry: (
     <>
       <header className="hero">
         <h1>Tasty Bites</h1>
+        {p.table.state === "ok" && <div className="tablebadge" aria-live="polite">Your table: <strong>{p.table.label}</strong></div>}
+        {p.table.state === "loading" && <div className="tablebadge">Checking your table…</div>}
         <input className="search" type="search" placeholder="Search the menu" aria-label="Search the menu" value={q} onChange={(e) => setQ(e.target.value)} />
       </header>
+      <TableNotice table={p.table} retry={p.retryTable} />
       {p.hasOrder && <button className="banner" onClick={p.onTrack}>Track your latest order</button>}
       {p.error && <div className="state" role="alert"><p>{p.error}</p><button className="primary" onClick={p.retry}>Try again</button></div>}
       {!p.menu && !p.error && <div className="state" aria-busy="true">Loading menu…</div>}
@@ -211,10 +254,8 @@ function CartScreen(p: { cart: CartLine[]; setCart: (c: CartLine[]) => void; est
   );
 }
 
-function CheckoutScreen(p: { cart: CartLine[]; estimate: number; back: () => void; done: (o: Order) => void }) {
-  const [type, setType] = useState<OrderRequest["orderType"]>("dine_in");
-  const [tables, setTables] = useState<TableRef[]>([]);
-  const [tableId, setTableId] = useState<number | undefined>();
+function CheckoutScreen(p: { cart: CartLine[]; estimate: number; table: TableCtx; retryTable: () => void; back: () => void; done: (o: Order) => void }) {
+  const [type, setType] = useState<OrderRequest["orderType"]>(p.table.state === "ok" ? "dine_in" : "takeaway");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
@@ -222,14 +263,14 @@ function CheckoutScreen(p: { cart: CartLine[]; estimate: number; back: () => voi
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const key = useRef(newKey()); // one key per checkout attempt, so a retry cannot create a second order
-  useEffect(() => { getTables().then((t) => setTables(t.tables)).catch(() => setTables([])); }, []);
 
-  const valid = type === "dine_in" ? !!tableId : type === "delivery" ? address.trim() !== "" && phone.trim() !== "" : true;
+  const tableOk = p.table.state === "ok";
+  const valid = type === "dine_in" ? tableOk : type === "delivery" ? address.trim() !== "" && phone.trim() !== "" : true;
 
   async function submit() {
     setBusy(true); setError(null);
     const req: OrderRequest = {
-      orderType: type, tableId: type === "dine_in" ? tableId : undefined, customerName: name, customerPhone: phone,
+      orderType: type, tableToken: type === "dine_in" ? p.table.token : undefined, customerName: name, customerPhone: phone,
       deliveryAddress: type === "delivery" ? address : "", notes,
       items: p.cart.map((l) => ({ menuItemId: l.item.id, variantId: l.variantId, extraIds: l.extraIds, quantity: l.quantity, note: l.note })),
     };
@@ -237,6 +278,7 @@ function CheckoutScreen(p: { cart: CartLine[]; estimate: number; back: () => voi
     catch (e) {
       const err = e as ApiError;
       if (err.status === 409 && err.code === "idempotency_conflict") key.current = newKey();
+      if (err.code === "table_invalid") { forgetTable(); p.retryTable(); }
       setError(err.message);
     } finally { setBusy(false); }
   }
@@ -251,12 +293,9 @@ function CheckoutScreen(p: { cart: CartLine[]; estimate: number; back: () => voi
           ))}
         </div>
         {type === "dine_in" && (
-          <label className="field">Your table
-            <select value={tableId ?? ""} onChange={(e) => setTableId(e.target.value ? Number(e.target.value) : undefined)}>
-              <option value="">Choose a table</option>
-              {tables.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
-            </select>
-          </label>
+          tableOk
+            ? <div className="tablecard" aria-live="polite">Your table<strong>{p.table.label}</strong><span className="hint">Check this matches the table you are sitting at.</span></div>
+            : <div className="error" role="alert">{p.table.state === "loading" ? "Checking your table…" : "Scan the QR code on your table to order for a table, or choose takeaway."}</div>
         )}
         <label className="field">Name (optional)<input value={name} maxLength={80} onChange={(e) => setName(e.target.value)} /></label>
         {type === "delivery" && (
@@ -278,6 +317,7 @@ function CheckoutScreen(p: { cart: CartLine[]; estimate: number; back: () => voi
 function StatusScreen(p: { token: string; back: () => void }) {
   const [order, setOrder] = useState<Order | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
   useEffect(() => {
     let stop = false;
     const tick = async () => {
@@ -285,8 +325,13 @@ function StatusScreen(p: { token: string; back: () => void }) {
       catch (e) { if (!stop) setError((e as ApiError).message); }
     };
     tick();
-    const id = setInterval(tick, 5000);
-    return () => { stop = true; clearInterval(id); };
+    // Real-time updates when the runtime supports streaming; a slow poll is always kept as a safety net.
+    const close = connectSse({
+      url: `${API_BASE}/api/v1/orders/track/${encodeURIComponent(p.token)}/events`,
+      onReady: tick, onEvent: tick, onState: (st) => setLive(st === "live"), onFatal: () => setLive(false),
+    });
+    const id = setInterval(tick, 20000);
+    return () => { stop = true; clearInterval(id); close(); };
   }, [p.token]);
 
   return (
@@ -298,7 +343,7 @@ function StatusScreen(p: { token: string; back: () => void }) {
         <div className="form">
           <div className="ordernum">Order #{order.orderNumber}</div>
           <div className={`status s-${order.status}`}>{STATUS_TEXT[order.status] ?? order.status}</div>
-          <div className="hint">Payment: {PAY_TEXT[order.paymentStatus] ?? order.paymentStatus}</div>
+          <div className="hint">Payment: {PAY_TEXT[order.paymentStatus] ?? order.paymentStatus}{live ? " · Live updates on" : ""}</div>
           <ul className="list">
             {order.items.map((i) => (
               <li key={i.id} className="cartline">
