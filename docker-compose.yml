@@ -14,8 +14,7 @@ services:
     depends_on: { db: { condition: service_healthy } }
     environment:
       DATABASE_URL: postgres://tastybites:${DB_PASSWORD}@db:5432/tastybites?sslmode=disable
-      ALLOWED_ORIGINS: http://localhost:5173,http://localhost:5174,http://localhost:5175
-      PUBLIC_MINIAPP_URL: ${PUBLIC_MINIAPP_URL:-http://localhost:5173}
+      ALLOWED_ORIGINS: http://localhost:5173,http://localhost:5174
       SEED_DEV_DATA: ${SEED_DEV_DATA:-false}
       SEED_PASSWORD: ${SEED_PASSWORD:-}
     ports: ["8080:8080"]

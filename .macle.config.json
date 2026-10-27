@@ -1,0 +1,8 @@
+{
+  "buildType": 1,
+  "buildCmd": "npm --prefix apps/customer-miniapp run build:macle",
+  "buildDist": "D:\\Downloads\\tasty-bites\\apps\\customer-miniapp\\dist",
+  "entryPagePath": "index.html",
+  "appID": 1792670432016,
+  "isCompile": false
+}
