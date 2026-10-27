@@ -14,11 +14,19 @@ import (
 
 	"tastybites/internal/auth"
 	"tastybites/internal/httpx"
+	"tastybites/internal/realtime"
 )
 
 type Service struct {
 	DB       *sql.DB
-	BranchID int64 // default branch for customer-created orders
+	BranchID int64         // default branch for customer-created orders
+	Hub      *realtime.Hub // optional; nil disables live publishing (events are still recorded)
+}
+
+func (s *Service) publish(evs ...realtime.Event) {
+	if s.Hub != nil {
+		s.Hub.Publish(evs...)
+	}
 }
 
 type LineIn struct {
@@ -30,7 +38,8 @@ type LineIn struct {
 }
 type CreateIn struct {
 	OrderType       string   `json:"orderType"`
-	TableID         *int64   `json:"tableId"`
+	TableID         *int64   `json:"tableId"`    // staff only; customers must use TableToken
+	TableToken      string   `json:"tableToken"` // customers: secret from the table QR code
 	CustomerName    string   `json:"customerName"`
 	CustomerPhone   string   `json:"customerPhone"`
 	DeliveryAddress string   `json:"deliveryAddress"`
@@ -132,7 +141,7 @@ func (s *Service) create(r *http.Request, branch int64, source string, actor *in
 
 	if in.TableID != nil {
 		var ok bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM dining_tables WHERE id=$1 AND branch_id=$2)`, *in.TableID, branch).Scan(&ok); err != nil {
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM dining_tables WHERE id=$1 AND branch_id=$2 AND active)`, *in.TableID, branch).Scan(&ok); err != nil {
 			return 0, "", err
 		}
 		if !ok {
@@ -237,12 +246,20 @@ func (s *Service) create(r *http.Request, branch int64, source string, actor *in
 	if _, err := tx.Exec(`INSERT INTO order_status_history(order_id,from_status,to_status,actor_id) VALUES($1,NULL,'placed',$2)`, orderID, actor); err != nil {
 		return 0, "", err
 	}
+	ev, err := realtime.Record(tx, "order.created", orderID)
+	if err != nil {
+		return 0, "", err
+	}
 	if idemKey != "" {
 		if _, err := tx.Exec(`INSERT INTO idempotency_records(key,scope,request_hash,order_id) VALUES($1,$2,$3,$4)`, idemKey, scope, reqHash, orderID); err != nil {
 			return 0, "", err
 		}
 	}
-	return orderID, token, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, "", err
+	}
+	s.publish(ev) // only after the order is durably committed
+	return orderID, token, nil
 }
 
 // CustomerCreate is the unauthenticated Mini-App endpoint. Idempotency-Key is mandatory.
@@ -257,6 +274,23 @@ func (s *Service) CustomerCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
+	if in.TableID != nil {
+		httpx.Fail(w, bad("Scan the QR code on your table to order for a table."))
+		return
+	}
+	if in.OrderType == "dine_in" {
+		var tid int64
+		err := s.DB.QueryRow(`SELECT id FROM dining_tables WHERE qr_token=$1 AND active AND branch_id=$2`, in.TableToken, s.BranchID).Scan(&tid)
+		if err == sql.ErrNoRows || in.TableToken == "" {
+			httpx.Fail(w, httpx.Err(400, "table_invalid", "This table QR code is not valid. Please scan the code on your table again or ask staff."))
+			return
+		} else if err != nil {
+			httpx.Fail(w, err)
+			return
+		}
+		in.TableID = &tid
+	}
+	in.TableToken = "" // never stored or hashed
 	id, tok, err := s.create(r, s.BranchID, "customer", nil, in, key)
 	if err != nil {
 		httpx.Fail(w, err)
@@ -278,13 +312,17 @@ func (s *Service) StaffCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := auth.From(r)
+	if in.TableToken != "" {
+		httpx.Fail(w, bad("Staff orders use tableId."))
+		return
+	}
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	id, _, err := s.create(r, u.BranchID, "staff", &u.ID, in, key)
 	if err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	o, err := s.fetch(id, false)
+	o, err := s.fetchFor(id, u.Role)
 	if err != nil {
 		httpx.Fail(w, err)
 		return
@@ -334,6 +372,15 @@ func (s *Service) fetch(id int64, forCustomer bool) (*Order, error) {
 	return &o, nil
 }
 
+// fetchFor returns an order for a staff role. The kitchen does not need customer contact details.
+func (s *Service) fetchFor(id int64, role string) (*Order, error) {
+	o, err := s.fetch(id, false)
+	if err == nil && role == "kitchen" {
+		o.CustomerPhone, o.DeliveryAddress, o.CustomerName = "", "", ""
+	}
+	return o, err
+}
+
 // Track lets a customer follow an order using the unguessable token returned at creation.
 func (s *Service) Track(w http.ResponseWriter, r *http.Request) {
 	var id int64
@@ -373,7 +420,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 	out := []*Order{}
 	for _, id := range ids {
-		o, err := s.fetch(id, false)
+		o, err := s.fetchFor(id, u.Role)
 		if err != nil {
 			httpx.Fail(w, err)
 			return
@@ -385,7 +432,7 @@ func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) Get(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	o, err := s.owned(id, auth.From(r).BranchID)
+	o, err := s.owned(id, auth.From(r))
 	if err != nil {
 		httpx.Fail(w, err)
 		return
@@ -393,12 +440,12 @@ func (s *Service) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, o)
 }
 
-func (s *Service) owned(id, branch int64) (*Order, error) {
+func (s *Service) owned(id int64, u auth.User) (*Order, error) {
 	var b int64
-	if err := s.DB.QueryRow(`SELECT branch_id FROM orders WHERE id=$1`, id).Scan(&b); err != nil || b != branch {
+	if err := s.DB.QueryRow(`SELECT branch_id FROM orders WHERE id=$1`, id).Scan(&b); err != nil || b != u.BranchID {
 		return nil, httpx.Err(404, "not_found", "Order not found.")
 	}
-	return s.fetch(id, false)
+	return s.fetchFor(id, u.Role)
 }
 
 // allowedTransition encodes the order state machine and who may drive each step.
@@ -480,11 +527,17 @@ func (s *Service) SetStatus(w http.ResponseWriter, r *http.Request) {
 	if in.Status == "cancelled" {
 		tx.Exec(`INSERT INTO audit_logs(actor_id,action,entity,entity_id,detail) VALUES($1,'order.cancel','order',$2,$3)`, u.ID, id, in.Reason)
 	}
+	ev, err := realtime.Record(tx, "order.updated", id)
+	if err != nil {
+		httpx.Fail(w, err)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	o, _ := s.fetch(id, false)
+	s.publish(ev)
+	o, _ := s.fetchFor(id, u.Role)
 	httpx.JSON(w, 200, o)
 }
 
@@ -545,11 +598,17 @@ func (s *Service) SetKitchenStatus(w http.ResponseWriter, r *http.Request) {
 		tx.Exec(`UPDATE orders SET status=$2, updated_at=now() WHERE id=$1`, id, next)
 		tx.Exec(`INSERT INTO order_status_history(order_id,from_status,to_status,actor_id,reason) VALUES($1,$2,$3,$4,'kitchen item update')`, id, ostatus, next, u.ID)
 	}
+	ev, err := realtime.Record(tx, "order.updated", id)
+	if err != nil {
+		httpx.Fail(w, err)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	o, _ := s.fetch(id, false)
+	s.publish(ev)
+	o, _ := s.fetchFor(id, u.Role)
 	httpx.JSON(w, 200, o)
 }
 
@@ -587,18 +646,24 @@ func (s *Service) CashPayment(w http.ResponseWriter, r *http.Request) {
 	}
 	tx.Exec(`UPDATE orders SET payment_status='paid', updated_at=now() WHERE id=$1`, id)
 	tx.Exec(`INSERT INTO audit_logs(actor_id,action,entity,entity_id,detail) VALUES($1,'payment.cash','order',$2,$3)`, u.ID, id, strconv.FormatInt(total, 10))
+	ev, err := realtime.Record(tx, "payment.updated", id)
+	if err != nil {
+		httpx.Fail(w, err)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	o, _ := s.fetch(id, false)
+	s.publish(ev)
+	o, _ := s.fetchFor(id, u.Role)
 	httpx.JSON(w, 200, o)
 }
 
 func (s *Service) Tables(w http.ResponseWriter, r *http.Request) {
 	u := auth.From(r)
 	rows, err := s.DB.Query(`SELECT t.id,t.label,t.seats,
-		EXISTS(SELECT 1 FROM orders o WHERE o.table_id=t.id AND o.status NOT IN ('completed','cancelled')) FROM dining_tables t WHERE t.branch_id=$1 ORDER BY t.id`, u.BranchID)
+		EXISTS(SELECT 1 FROM orders o WHERE o.table_id=t.id AND o.status NOT IN ('completed','cancelled')) FROM dining_tables t WHERE t.branch_id=$1 AND t.active ORDER BY t.id`, u.BranchID)
 	if err != nil {
 		httpx.Fail(w, err)
 		return
@@ -614,27 +679,6 @@ func (s *Service) Tables(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var t T
 		rows.Scan(&t.ID, &t.Label, &t.Seats, &t.Occupied)
-		out = append(out, t)
-	}
-	httpx.JSON(w, 200, map[string]any{"tables": out})
-}
-
-// PublicTables lists table ids and labels so the Mini-App can map a scanned table.
-func (s *Service) PublicTables(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(`SELECT id,label FROM dining_tables WHERE branch_id=$1 ORDER BY id`, s.BranchID)
-	if err != nil {
-		httpx.Fail(w, err)
-		return
-	}
-	defer rows.Close()
-	type T struct {
-		ID    int64  `json:"id"`
-		Label string `json:"label"`
-	}
-	out := []T{}
-	for rows.Next() {
-		var t T
-		rows.Scan(&t.ID, &t.Label)
 		out = append(out, t)
 	}
 	httpx.JSON(w, 200, map[string]any{"tables": out})

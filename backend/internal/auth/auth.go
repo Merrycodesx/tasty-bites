@@ -99,9 +99,7 @@ func (s *Service) Require(roles ...string) func(http.HandlerFunc) http.HandlerFu
 				httpx.Fail(w, httpx.Err(401, "unauthenticated", "Please sign in."))
 				return
 			}
-			var u User
-			err := s.DB.QueryRow(`SELECT u.id,u.branch_id,u.username,u.full_name,u.role FROM sessions s JOIN staff_users u ON u.id=s.user_id
-				WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active`, hashToken(t)).Scan(&u.ID, &u.BranchID, &u.Username, &u.FullName, &u.Role)
+			u, err := s.Lookup(t)
 			if err != nil {
 				httpx.Fail(w, httpx.Err(401, "unauthenticated", "Your session expired. Please sign in again."))
 				return
@@ -114,6 +112,17 @@ func (s *Service) Require(roles ...string) func(http.HandlerFunc) http.HandlerFu
 		}
 	}
 }
+
+// Lookup resolves a bearer token to an active staff user with an unexpired session.
+func (s *Service) Lookup(token string) (User, error) {
+	var u User
+	err := s.DB.QueryRow(`SELECT u.id,u.branch_id,u.username,u.full_name,u.role FROM sessions s JOIN staff_users u ON u.id=s.user_id
+		WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active`, hashToken(token)).Scan(&u.ID, &u.BranchID, &u.Username, &u.FullName, &u.Role)
+	return u, err
+}
+
+// BearerToken extracts the bearer token from a request ("" if absent).
+func BearerToken(r *http.Request) string { return bearer(r) }
 
 func From(r *http.Request) User { u, _ := r.Context().Value(ctxKey{}).(User); return u }
 

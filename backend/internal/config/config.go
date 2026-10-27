@@ -11,6 +11,7 @@ type Config struct {
 	DatabaseURL    string
 	ListenAddr     string
 	AllowedOrigins []string
+	MiniAppURL     string // base URL encoded into table QR codes
 	SeedDevData    bool   // only for local development
 	SeedPassword   string // password for seeded dev staff accounts
 }
@@ -21,6 +22,7 @@ func Load() (Config, error) {
 		ListenAddr:   getenv("LISTEN_ADDR", ":8080"),
 		SeedDevData:  os.Getenv("SEED_DEV_DATA") == "true",
 		SeedPassword: os.Getenv("SEED_PASSWORD"),
+		MiniAppURL:   strings.TrimSpace(os.Getenv("PUBLIC_MINIAPP_URL")),
 	}
 	for _, o := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
 		if o = strings.TrimSpace(o); o != "" {
